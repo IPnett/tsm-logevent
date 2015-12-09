@@ -22,8 +22,7 @@
  * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
  * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
-
-//#include <ctype.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,6 +33,7 @@
 #include "dapidata.h"
 //#include "dapiutil.h" /* seems unneeded now */
 #include "dsmrc.h"
+#include <sys/stat.h>
 
 // #define DEBUG 1
 
@@ -41,8 +41,13 @@ char **globalArgv;
 
 void printdsmerror(dsUint32_t,dsInt16_t);
 
-int main(int argc,char **argv) {
-
+int
+main(int argc,char **argv) {
+  
+  int fdesc, usingfile=0, done=0;
+  struct stat statbuf;
+  FILE* stream;
+  
   dsInt16_t dsmresult;
   dsUint32_t myhandle;
 
@@ -54,18 +59,51 @@ int main(int argc,char **argv) {
   dsmLogExIn_t *log_in;
   dsmLogExOut_t *log_out;
 
-  if (2 != argc) {
-    printf("Usage: %s <string in quotes to send>\n", argv[0]);
-    exit(1);
-  } else {
-  
+  char strbuf[1024];
+
+  if (((2 == argc)&&(strncmp(argv[1],"-f",2))) ||	\
+      ((3 == argc)&&(strncmp(argv[1],"-f",2)==0))) {
+    
+    /* handle -f case first */
+    if (3 == argc) {
+      usingfile=1;
+      fdesc=open(argv[2],O_RDONLY);
+      if (fdesc < 0) {
+	printf("Could not open file %s\n", argv[2]);
+	exit(1);
+      }
+
+      if (0==fstat(fdesc, &statbuf)) {
+	if ((statbuf.st_size > 5*1024) || \
+	    (statbuf.st_size < 2)) {
+	  printf("Input file %s too small/large to send: %lld\n",
+		 argv[2], statbuf.st_size);
+	  exit(1);
+	}
+#ifdef DEBUG
+	else {
+	  printf("Size of file: %lld\n",statbuf.st_size);
+	}
+#endif /* DEBUG */
+      } else {
+	perror("fstat()");
+	exit(1);
+      }
+
+      stream=fdopen(fdesc,"r");
+      if (NULL==stream) {
+	perror("fdopen failed");
+	exit(1);
+      }
+    } 
+    
     if ((my_opts=(optStruct*)calloc(1,sizeof(*my_opts))) == NULL) {
-      printf("no mem for calloc\n");
+      printf("No mem for calloc\n");
       exit(1);
     }
 #ifdef DEBUG
     else {
-      printf("sizeof: %d\n",sizeof(*my_opts));
+      printf("Sizeof optstruct: %d\n",sizeof(*my_opts));
     }
 #endif /* DEBUG */
     
@@ -75,7 +113,7 @@ int main(int argc,char **argv) {
 #endif /* DEBUG */
     
     if ((init_in=(dsmInitExIn_t*)calloc(1,sizeof(*init_in))) == NULL) {
-      printf("no mem for init_in\n");
+      printf("No mem for init_in\n");
       exit(1);
     }    
 #ifdef DEBUG
@@ -85,7 +123,7 @@ int main(int argc,char **argv) {
 #endif /* DEBUG */
     
     if ((init_out=(dsmInitExOut_t*)calloc(1,sizeof(*init_out))) == NULL) {
-      printf("no mem for init_out\n");
+      printf("No mem for init_out\n");
       exit(1);
     }
 #ifdef DEBUG
@@ -95,7 +133,7 @@ int main(int argc,char **argv) {
 #endif /* DEBUG */
     
     if ((log_in=(dsmLogExIn_t*)calloc(1,sizeof(*log_in))) == NULL) {
-      printf("no mem for log_in\n");
+      printf("No mem for log_in\n");
       exit(1);
     }    
 #ifdef DEBUG
@@ -105,12 +143,12 @@ int main(int argc,char **argv) {
 #endif /* DEBUG */
     
     if ((log_out=(dsmLogExOut_t*)calloc(1,sizeof(*log_out))) == NULL) {
-      printf("no mem for log_out\n");
+      printf("No mem for log_out\n");
       exit(1);
     }
 #ifdef DEBUG
     else {
-      printf("sizeof: %d\n",sizeof(*log_out));
+      printf("Sizeof: %d\n",sizeof(*log_out));
     }
 #endif /* DEBUG */
     
@@ -135,31 +173,63 @@ int main(int argc,char **argv) {
 #ifdef DEBUG
     printf("dsmInitEx returned: %d\n",dsmresult);
 #endif /* DEBUG */
-    
+
+
+    /* set common settings for both cmdline and file log shipping */
     log_in->severity = logSevInfo; /* ANE4990 */
     strncpy(log_in->appMsgID, "IPN4711",8);
-    log_in->logType        = logBoth;
-    log_in->message        = argv[1];
-    
-    dsmresult=dsmLogEventEx(myhandle,log_in,log_out);
-    if (DSM_RC_OK != dsmresult) {
-      printdsmerror(myhandle, dsmresult);
-      if (dsmresult == DSM_RC_STRING_TOO_LONG) {
-	printf("(max ~1000 chars)\n");
-      }
-      /* wont stop, we still want to run the exit cleanup */
+
+    if(0==usingfile) {
+      log_in->message        = argv[1];
+      log_in->logType        = logBoth;
+      done=1;
     } else {
-      printf("Message sent ok.\n");
+      log_in->logType        = logServer;
+      log_in->message        = fgets(strbuf,1010,stream);
     }
+
+    do {
+
+#ifdef DEBUG
+      printf("would send string: %s", log_in->message);
+#else     
+      dsmresult=dsmLogEventEx(myhandle,log_in,log_out);
+      if (DSM_RC_OK != dsmresult) {
+	printdsmerror(myhandle, dsmresult);
+	if (dsmresult == DSM_RC_STRING_TOO_LONG) {
+	  printf("(max ~1000 chars)\n");
+	}
+	/* wont stop, we still want to run the exit cleanup */
+      } else {
+	printf("Message sent ok.\n");
+      }
+#endif /* DEBUG */
+
+      if (usingfile) {
+	log_in->message        = fgets(strbuf,1010,stream);
+	if (log_in->message == NULL) {
+	  done=1; /* break out of loop in case fgets stops
+		   reading useful data out of the file */
+	}
+      }
+
+    } while (!done);
     
+
+
+
     dsmresult=dsmTerminate(myhandle);
     if (DSM_RC_OK != dsmresult) {
       printdsmerror(myhandle, dsmresult);
     } else {
-      printf("exiting\n");
+      printf("Exiting\n");
     }
-    
+      
     exit(0);
+  } else {
+    printf("Usage #1: %s <string in quotes to send>\n", argv[0]);
+    printf("Usage #2: %s -f <filename to send>\n", argv[0]);
+    exit(1);
   }
 }
 
